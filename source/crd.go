@@ -197,11 +197,13 @@ func (cs *crdSource) Endpoints(ctx context.Context) ([]*endpoint.Endpoint, error
 			}
 			isNAPTR := ep.RecordType == endpoint.RecordTypeNAPTR
 			isTXT := ep.RecordType == endpoint.RecordTypeTXT
+			isSRV := ep.RecordType == endpoint.RecordTypeSRV
 			illegalTarget := false
 			for _, target := range ep.Targets {
 				hasDot := strings.HasSuffix(target, ".")
 				// Skip dot validation for TXT records as they can contain arbitrary text
-				if !isTXT && ((isNAPTR && !hasDot) || (!isNAPTR && hasDot)) {
+				// Skip dot validation for SRV records as the target hostname must end with a dot per RFC 2782
+				if !isTXT && !isSRV && ((isNAPTR && !hasDot) || (!isNAPTR && hasDot)) {
 					illegalTarget = true
 					break
 				}

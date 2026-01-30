@@ -18,6 +18,7 @@ package cloudflare
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -853,10 +854,13 @@ func (p *CloudFlareProvider) newCloudFlareChange(action changeAction, ep *endpoi
 
 func newDNSRecordIndex(r dns.RecordResponse) DNSRecordIndex {
 	content := r.Content
-	// For SRV records, Content may be empty and the data is in the Data field
+	// For SRV records, extract data from raw JSON because cloudflare-go v5's
+	// RecordResponse union type doesn't properly populate the Data field.
 	if r.Type == "SRV" {
-		if srvData, ok := r.Data.(*dns.SRVRecordData); ok {
+		if srvData := getSRVData(r); srvData != nil {
 			content = formatSRVContent(srvData)
+		} else {
+			log.Warnf("Failed to extract SRV data for record %s, using raw content", r.Name)
 		}
 	}
 	return DNSRecordIndex{Name: r.Name, Type: string(r.Type), Content: content}
@@ -948,10 +952,12 @@ func (p *CloudFlareProvider) groupByNameAndTypeWithCustomHostnames(records DNSRe
 			case "MX":
 				targets[i] = fmt.Sprintf("%v %v", record.Priority, record.Content)
 			case "SRV":
-				if srvData, ok := record.Data.(*dns.SRVRecordData); ok {
+				// Extract SRV data from raw JSON because cloudflare-go v5's
+				// RecordResponse union type doesn't properly populate the Data field.
+				if srvData := getSRVData(record); srvData != nil {
 					targets[i] = formatSRVContent(srvData)
 				} else {
-					log.Warnf("SRV record data is not in expected format for record %s, using raw content", record.Name)
+					log.Warnf("Failed to extract SRV data for record %s, using raw content", record.Name)
 					targets[i] = record.Content
 				}
 			default:
@@ -1033,5 +1039,38 @@ func parseSRVContent(content string) (*CloudflareSRVData, error) {
 
 // formatSRVContent converts SRV record data to the standard string format used by external-dns.
 func formatSRVContent(data *dns.SRVRecordData) string {
-	return fmt.Sprintf("%d %d %d %s", int(data.Priority), int(data.Weight), int(data.Port), data.Target)
+	target := data.Target
+	// Ensure target has trailing dot per RFC 2782
+	if !strings.HasSuffix(target, ".") {
+		target = target + "."
+	}
+	return fmt.Sprintf("%d %d %d %s", int(data.Priority), int(data.Weight), int(data.Port), target)
+}
+
+// ensureTrailingDot adds a trailing dot to a hostname if not already present.
+// This is used for RFC 2782 compliance with SRV record targets.
+func ensureTrailingDot(s string) string {
+	if !strings.HasSuffix(s, ".") {
+		return s + "."
+	}
+	return s
+}
+
+// getSRVData extracts SRV record data from a RecordResponse by re-unmarshaling the raw JSON.
+// This is necessary because cloudflare-go v5's RecordResponse union type doesn't properly
+// populate the Data field when listing records. The raw JSON contains the correct data,
+// so we re-unmarshal it into the specific RecordResponseSRVRecord type.
+func getSRVData(r dns.RecordResponse) *dns.SRVRecordData {
+	rawJSON := r.JSON.RawJSON()
+	if rawJSON == "" {
+		return nil
+	}
+
+	var srvRecord dns.RecordResponseSRVRecord
+	if err := json.Unmarshal([]byte(rawJSON), &srvRecord); err != nil {
+		log.Debugf("Failed to unmarshal SRV record from raw JSON: %v", err)
+		return nil
+	}
+
+	return &srvRecord.Data
 }

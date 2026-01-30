@@ -18,6 +18,7 @@ package cloudflare
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -516,7 +517,7 @@ func TestCloudflareSrv(t *testing.T) {
 		{
 			RecordType: "SRV",
 			DNSName:    "_sip._tcp.srv.bar.com",
-			Targets:    endpoint.Targets{"10 20 5060 sip.bar.com", "10 50 5060 sip2.bar.com"},
+			Targets:    endpoint.Targets{"10 20 5060 sip.bar.com.", "10 50 5060 sip2.bar.com."},
 			RecordTTL:  120,
 		},
 	}
@@ -525,38 +526,38 @@ func TestCloudflareSrv(t *testing.T) {
 		{
 			Name:     "Create",
 			ZoneId:   "001",
-			RecordId: generateDNSRecordID("SRV", "_sip._tcp.srv.bar.com", "10 20 5060 sip.bar.com"),
+			RecordId: generateDNSRecordID("SRV", "_sip._tcp.srv.bar.com", "10 20 5060 sip.bar.com."),
 			RecordData: dns.RecordResponse{
-				ID:      generateDNSRecordID("SRV", "_sip._tcp.srv.bar.com", "10 20 5060 sip.bar.com"),
+				ID:      generateDNSRecordID("SRV", "_sip._tcp.srv.bar.com", "10 20 5060 sip.bar.com."),
 				Type:    "SRV",
 				Name:    "_sip._tcp.srv.bar.com",
-				Content: "10 20 5060 sip.bar.com",
+				Content: "10 20 5060 sip.bar.com.",
 				TTL:     120,
 				Proxied: false,
 				Data: &dns.SRVRecordData{
 					Priority: 10,
 					Weight:   20,
 					Port:     5060,
-					Target:   "sip.bar.com",
+					Target:   "sip.bar.com.",
 				},
 			},
 		},
 		{
 			Name:     "Create",
 			ZoneId:   "001",
-			RecordId: generateDNSRecordID("SRV", "_sip._tcp.srv.bar.com", "10 50 5060 sip2.bar.com"),
+			RecordId: generateDNSRecordID("SRV", "_sip._tcp.srv.bar.com", "10 50 5060 sip2.bar.com."),
 			RecordData: dns.RecordResponse{
-				ID:      generateDNSRecordID("SRV", "_sip._tcp.srv.bar.com", "10 50 5060 sip2.bar.com"),
+				ID:      generateDNSRecordID("SRV", "_sip._tcp.srv.bar.com", "10 50 5060 sip2.bar.com."),
 				Type:    "SRV",
 				Name:    "_sip._tcp.srv.bar.com",
-				Content: "10 50 5060 sip2.bar.com",
+				Content: "10 50 5060 sip2.bar.com.",
 				TTL:     120,
 				Proxied: false,
 				Data: &dns.SRVRecordData{
 					Priority: 10,
 					Weight:   50,
 					Port:     5060,
-					Target:   "sip2.bar.com",
+					Target:   "sip2.bar.com.",
 				},
 			},
 		},
@@ -782,13 +783,13 @@ func TestCloudflareSetProxied(t *testing.T) {
 				content = "mx.example.com"
 				priority = 10
 			case "SRV":
-				targets = endpoint.Targets{"10 20 5060 sip.example.com"}
-				content = "10 20 5060 sip.example.com"
+				targets = endpoint.Targets{"10 20 5060 sip.example.com."}
+				content = "10 20 5060 sip.example.com."
 				srvData = &dns.SRVRecordData{
 					Priority: 10,
 					Weight:   20,
 					Port:     5060,
-					Target:   "sip.example.com",
+					Target:   "sip.example.com.",
 				}
 			default:
 				targets = endpoint.Targets{"127.0.0.1"}
@@ -3201,7 +3202,7 @@ func TestFormatSRVContent(t *testing.T) {
 				Port:     5060,
 				Target:   "sip.example.com",
 			},
-			expected: "10 20 5060 sip.example.com",
+			expected: "10 20 5060 sip.example.com.",
 		},
 		{
 			name: "zero values",
@@ -3211,7 +3212,17 @@ func TestFormatSRVContent(t *testing.T) {
 				Port:     80,
 				Target:   "web.example.com",
 			},
-			expected: "0 0 80 web.example.com",
+			expected: "0 0 80 web.example.com.",
+		},
+		{
+			name: "target already has trailing dot",
+			data: &dns.SRVRecordData{
+				Priority: 10,
+				Weight:   20,
+				Port:     5060,
+				Target:   "sip.example.com.",
+			},
+			expected: "10 20 5060 sip.example.com.",
 		},
 	}
 
@@ -3279,26 +3290,42 @@ func TestNewCloudFlareChangeSRV(t *testing.T) {
 	}
 }
 
+// createSRVRecordResponse creates a dns.RecordResponse for SRV records via JSON unmarshaling.
+// This simulates how Cloudflare API returns SRV records and ensures the raw JSON is available
+// for the getSRVData() function to re-unmarshal.
+func createSRVRecordResponse(t *testing.T, id, name string, ttl int, priority, weight, port int, target string) dns.RecordResponse {
+	t.Helper()
+	// Create JSON that matches Cloudflare API response format
+	jsonData := fmt.Sprintf(`{
+		"id": "%s",
+		"name": "%s",
+		"type": "SRV",
+		"ttl": %d,
+		"content": "%d %d %d %s",
+		"data": {
+			"priority": %d,
+			"weight": %d,
+			"port": %d,
+			"target": "%s"
+		},
+		"proxied": false,
+		"proxiable": false
+	}`, id, name, ttl, priority, weight, port, target, priority, weight, port, target)
+
+	var record dns.RecordResponse
+	err := json.Unmarshal([]byte(jsonData), &record)
+	require.NoError(t, err, "Failed to unmarshal test SRV record")
+	return record
+}
+
 func TestGroupByNameAndTypeWithCustomHostnames_SRV(t *testing.T) {
 	provider := &CloudFlareProvider{}
 
-	srvData := &dns.SRVRecordData{
-		Priority: 10,
-		Weight:   20,
-		Port:     5060,
-		Target:   "sip.example.com",
-	}
+	// Create record via JSON unmarshaling to simulate Cloudflare API response
+	record := createSRVRecordResponse(t, "123", "_sip._tcp.example.com", 120, 10, 20, 5060, "sip.example.com")
 
 	records := DNSRecordsMap{
-		{Name: "_sip._tcp.example.com", Type: "SRV", Content: "10 20 5060 sip.example.com"}: {
-			ID:      "123",
-			Name:    "_sip._tcp.example.com",
-			Type:    "SRV",
-			TTL:     120,
-			Proxied: false,
-			Data:    srvData,
-			Content: "10 20 5060 sip.example.com",
-		},
+		{Name: "_sip._tcp.example.com", Type: "SRV", Content: "10 20 5060 sip.example.com."}: record,
 	}
 
 	endpoints := provider.groupByNameAndTypeWithCustomHostnames(records, nil)
@@ -3307,7 +3334,40 @@ func TestGroupByNameAndTypeWithCustomHostnames_SRV(t *testing.T) {
 	assert.Equal(t, "_sip._tcp.example.com", endpoints[0].DNSName)
 	assert.Equal(t, "SRV", endpoints[0].RecordType)
 	require.Len(t, endpoints[0].Targets, 1)
-	assert.Equal(t, "10 20 5060 sip.example.com", endpoints[0].Targets[0])
+	assert.Equal(t, "10 20 5060 sip.example.com.", endpoints[0].Targets[0])
+}
+
+func TestGroupByNameAndTypeWithCustomHostnames_SRV_MultipleRecords(t *testing.T) {
+	// Test multiple SRV records with different priorities
+	provider := &CloudFlareProvider{}
+
+	record1 := createSRVRecordResponse(t, "123", "_sip._tcp.example.com", 120, 10, 20, 5060, "sip1.example.com")
+	record2 := createSRVRecordResponse(t, "124", "_sip._tcp.example.com", 120, 20, 30, 5061, "sip2.example.com")
+
+	records := DNSRecordsMap{
+		{Name: "_sip._tcp.example.com", Type: "SRV", Content: "10 20 5060 sip1.example.com."}: record1,
+		{Name: "_sip._tcp.example.com", Type: "SRV", Content: "20 30 5061 sip2.example.com."}: record2,
+	}
+
+	endpoints := provider.groupByNameAndTypeWithCustomHostnames(records, nil)
+
+	require.Len(t, endpoints, 1)
+	assert.Equal(t, "_sip._tcp.example.com", endpoints[0].DNSName)
+	assert.Equal(t, "SRV", endpoints[0].RecordType)
+	require.Len(t, endpoints[0].Targets, 2)
+}
+
+func TestNewDNSRecordIndex_SRV(t *testing.T) {
+	// Test that SRV records work correctly in newDNSRecordIndex
+	// Uses JSON unmarshaling to simulate real Cloudflare API response
+	record := createSRVRecordResponse(t, "123", "_sip._tcp.example.com", 120, 10, 20, 5060, "sip.example.com")
+
+	index := newDNSRecordIndex(record)
+
+	assert.Equal(t, "_sip._tcp.example.com", index.Name)
+	assert.Equal(t, "SRV", index.Type)
+	// Should be reconstructed as "priority weight port target."
+	assert.Equal(t, "10 20 5060 sip.example.com.", index.Content)
 }
 
 func TestGetSRVCreateParams(t *testing.T) {
