@@ -81,6 +81,14 @@ type DNSRecordIndex struct {
 
 type DNSRecordsMap map[DNSRecordIndex]dns.RecordResponse
 
+// CloudflareSRVData represents the structured data for SRV records as required by Cloudflare API.
+type CloudflareSRVData struct {
+	Priority int
+	Weight   int
+	Port     int
+	Target   string
+}
+
 var recordTypeProxyNotSupported = map[string]bool{
 	"LOC": true,
 	"MX":  true,
@@ -229,8 +237,12 @@ type cloudFlareChange struct {
 	CustomHostnamesPrev []string
 }
 
-// updateDNSRecordParam is a function that returns the appropriate Record Param based on the cloudFlareChange passed in
+// getUpdateDNSRecordParam returns the appropriate Record Param based on the cloudFlareChange passed in.
+// For SRV records, it uses the specialized SRVRecordParam type.
 func getUpdateDNSRecordParam(zoneID string, cfc cloudFlareChange) dns.RecordUpdateParams {
+	if cfc.ResourceRecord.Type == "SRV" {
+		return getSRVUpdateParams(zoneID, cfc)
+	}
 	return dns.RecordUpdateParams{
 		ZoneID: cloudflare.F(zoneID),
 		Body: dns.RecordUpdateParamsBody{
@@ -246,8 +258,12 @@ func getUpdateDNSRecordParam(zoneID string, cfc cloudFlareChange) dns.RecordUpda
 	}
 }
 
-// getCreateDNSRecordParam is a function that returns the appropriate Record Param based on the cloudFlareChange passed in
+// getCreateDNSRecordParam returns the appropriate Record Param based on the cloudFlareChange passed in.
+// For SRV records, it uses the specialized SRVRecordParam type.
 func getCreateDNSRecordParam(zoneID string, cfc *cloudFlareChange) dns.RecordNewParams {
+	if cfc.ResourceRecord.Type == "SRV" {
+		return getSRVCreateParams(zoneID, cfc)
+	}
 	return dns.RecordNewParams{
 		ZoneID: cloudflare.F(zoneID),
 		Body: dns.RecordNewParamsBody{
@@ -259,6 +275,56 @@ func getCreateDNSRecordParam(zoneID string, cfc *cloudFlareChange) dns.RecordNew
 			Priority: cloudflare.F(cfc.ResourceRecord.Priority),
 			Comment:  cloudflare.F(cfc.ResourceRecord.Comment),
 			Tags:     cloudflare.F(cfc.ResourceRecord.Tags),
+		},
+	}
+}
+
+// getSRVCreateParams returns the specialized SRVRecordParam for creating SRV records.
+func getSRVCreateParams(zoneID string, cfc *cloudFlareChange) dns.RecordNewParams {
+	srvData, ok := cfc.ResourceRecord.Data.(*dns.SRVRecordData)
+	if !ok {
+		log.Errorf("SRV record data is not in expected format for record %s", cfc.ResourceRecord.Name)
+		// Return empty params - the caller should handle this error case
+		return dns.RecordNewParams{ZoneID: cloudflare.F(zoneID)}
+	}
+	return dns.RecordNewParams{
+		ZoneID: cloudflare.F(zoneID),
+		Body: dns.SRVRecordParam{
+			Name: cloudflare.F(cfc.ResourceRecord.Name),
+			TTL:  cloudflare.F(cfc.ResourceRecord.TTL),
+			Type: cloudflare.F(dns.SRVRecordTypeSRV),
+			Data: cloudflare.F(dns.SRVRecordDataParam{
+				Priority: cloudflare.F(srvData.Priority),
+				Weight:   cloudflare.F(srvData.Weight),
+				Port:     cloudflare.F(srvData.Port),
+				Target:   cloudflare.F(srvData.Target),
+			}),
+			Comment: cloudflare.F(cfc.ResourceRecord.Comment),
+		},
+	}
+}
+
+// getSRVUpdateParams returns the specialized SRVRecordParam for updating SRV records.
+func getSRVUpdateParams(zoneID string, cfc cloudFlareChange) dns.RecordUpdateParams {
+	srvData, ok := cfc.ResourceRecord.Data.(*dns.SRVRecordData)
+	if !ok {
+		log.Errorf("SRV record data is not in expected format for record %s", cfc.ResourceRecord.Name)
+		// Return empty params - the caller should handle this error case
+		return dns.RecordUpdateParams{ZoneID: cloudflare.F(zoneID)}
+	}
+	return dns.RecordUpdateParams{
+		ZoneID: cloudflare.F(zoneID),
+		Body: dns.SRVRecordParam{
+			Name: cloudflare.F(cfc.ResourceRecord.Name),
+			TTL:  cloudflare.F(cfc.ResourceRecord.TTL),
+			Type: cloudflare.F(dns.SRVRecordTypeSRV),
+			Data: cloudflare.F(dns.SRVRecordDataParam{
+				Priority: cloudflare.F(srvData.Priority),
+				Weight:   cloudflare.F(srvData.Weight),
+				Port:     cloudflare.F(srvData.Port),
+				Target:   cloudflare.F(srvData.Target),
+			}),
+			Comment: cloudflare.F(cfc.ResourceRecord.Comment),
 		},
 	}
 }
@@ -740,14 +806,30 @@ func (p *CloudFlareProvider) newCloudFlareChange(action changeAction, ep *endpoi
 	}
 
 	var priority float64
-	if ep.RecordType == "MX" {
+	var data interface{}
+
+	switch ep.RecordType {
+	case "MX":
 		mxRecord, err := endpoint.NewMXRecord(target)
 		if err != nil {
 			return &cloudFlareChange{}, fmt.Errorf("failed to parse MX record target %q: %w", target, err)
-		} else {
-			priority = float64(*mxRecord.GetPriority())
-			target = *mxRecord.GetHost()
 		}
+		priority = float64(*mxRecord.GetPriority())
+		target = *mxRecord.GetHost()
+	case "SRV":
+		srvData, err := parseSRVContent(target)
+		if err != nil {
+			return &cloudFlareChange{}, fmt.Errorf("failed to parse SRV record target %q: %w", target, err)
+		}
+		// Store the SRV data for use in record creation/update
+		data = &dns.SRVRecordData{
+			Priority: float64(srvData.Priority),
+			Weight:   float64(srvData.Weight),
+			Port:     float64(srvData.Port),
+			Target:   srvData.Target,
+		}
+		// For SRV records, the Content field should contain the formatted string for lookups
+		target = formatSRVContent(data.(*dns.SRVRecordData))
 	}
 
 	return &cloudFlareChange{
@@ -761,6 +843,7 @@ func (p *CloudFlareProvider) newCloudFlareChange(action changeAction, ep *endpoi
 			Comment:  comment,
 			Tags:     tags,
 			Priority: priority,
+			Data:     data,
 		},
 		RegionalHostname:    p.regionalHostname(ep),
 		CustomHostnamesPrev: prevCustomHostnames,
@@ -769,7 +852,14 @@ func (p *CloudFlareProvider) newCloudFlareChange(action changeAction, ep *endpoi
 }
 
 func newDNSRecordIndex(r dns.RecordResponse) DNSRecordIndex {
-	return DNSRecordIndex{Name: r.Name, Type: string(r.Type), Content: r.Content}
+	content := r.Content
+	// For SRV records, Content may be empty and the data is in the Data field
+	if r.Type == "SRV" {
+		if srvData, ok := r.Data.(*dns.SRVRecordData); ok {
+			content = formatSRVContent(srvData)
+		}
+	}
+	return DNSRecordIndex{Name: r.Name, Type: string(r.Type), Content: content}
 }
 
 // getDNSRecordsMap retrieves all DNS records for a given zone and returns them as a DNSRecordsMap.
@@ -854,9 +944,17 @@ func (p *CloudFlareProvider) groupByNameAndTypeWithCustomHostnames(records DNSRe
 		}
 		targets := make([]string, len(records))
 		for i, record := range records {
-			if records[i].Type == "MX" {
+			switch record.Type {
+			case "MX":
 				targets[i] = fmt.Sprintf("%v %v", record.Priority, record.Content)
-			} else {
+			case "SRV":
+				if srvData, ok := record.Data.(*dns.SRVRecordData); ok {
+					targets[i] = formatSRVContent(srvData)
+				} else {
+					log.Warnf("SRV record data is not in expected format for record %s, using raw content", record.Name)
+					targets[i] = record.Content
+				}
+			default:
 				targets[i] = record.Content
 			}
 		}
@@ -895,9 +993,45 @@ func (p *CloudFlareProvider) groupByNameAndTypeWithCustomHostnames(records DNSRe
 // SupportedRecordType returns true if the record type is supported by the provider
 func (p *CloudFlareProvider) SupportedAdditionalRecordTypes(recordType string) bool {
 	switch recordType {
-	case endpoint.RecordTypeMX:
+	case endpoint.RecordTypeMX, endpoint.RecordTypeSRV:
 		return true
 	default:
 		return provider.SupportedRecordType(recordType)
 	}
+}
+
+// parseSRVContent parses the SRV record content string into the structured data required by Cloudflare API.
+// SRV record format is: "<priority> <weight> <port> <target>"
+func parseSRVContent(content string) (*CloudflareSRVData, error) {
+	parts := strings.Fields(content)
+	if len(parts) != 4 {
+		return nil, fmt.Errorf("invalid SRV record content: expected 4 parts (priority weight port target), got %d in %q", len(parts), content)
+	}
+
+	priority, err := strconv.Atoi(parts[0])
+	if err != nil {
+		return nil, fmt.Errorf("invalid priority in SRV record content %q: %w", parts[0], err)
+	}
+
+	weight, err := strconv.Atoi(parts[1])
+	if err != nil {
+		return nil, fmt.Errorf("invalid weight in SRV record content %q: %w", parts[1], err)
+	}
+
+	port, err := strconv.Atoi(parts[2])
+	if err != nil {
+		return nil, fmt.Errorf("invalid port in SRV record content %q: %w", parts[2], err)
+	}
+
+	return &CloudflareSRVData{
+		Priority: priority,
+		Weight:   weight,
+		Port:     port,
+		Target:   parts[3],
+	}, nil
+}
+
+// formatSRVContent converts SRV record data to the standard string format used by external-dns.
+func formatSRVContent(data *dns.SRVRecordData) string {
+	return fmt.Sprintf("%d %d %d %s", int(data.Priority), int(data.Weight), int(data.Port), data.Target)
 }

@@ -144,16 +144,37 @@ func NewMockCloudFlareClientWithRecords(records map[string][]dns.RecordResponse)
 }
 
 func (m *mockCloudFlareClient) CreateDNSRecord(ctx context.Context, params dns.RecordNewParams) (*dns.RecordResponse, error) {
-	body := params.Body.(dns.RecordNewParamsBody)
+	var record dns.RecordResponse
 
-	record := dns.RecordResponse{
-		ID:       generateDNSRecordID(body.Type.String(), body.Name.Value, body.Content.Value),
-		Name:     body.Name.Value,
-		TTL:      dns.TTL(body.TTL.Value),
-		Proxied:  body.Proxied.Value,
-		Type:     dns.RecordResponseType(body.Type.String()),
-		Content:  body.Content.Value,
-		Priority: body.Priority.Value,
+	// Handle SRV records which use dns.SRVRecordParam
+	if srvBody, ok := params.Body.(dns.SRVRecordParam); ok {
+		srvData := &dns.SRVRecordData{
+			Priority: srvBody.Data.Value.Priority.Value,
+			Weight:   srvBody.Data.Value.Weight.Value,
+			Port:     srvBody.Data.Value.Port.Value,
+			Target:   srvBody.Data.Value.Target.Value,
+		}
+		content := formatSRVContent(srvData)
+		record = dns.RecordResponse{
+			ID:      generateDNSRecordID("SRV", srvBody.Name.Value, content),
+			Name:    srvBody.Name.Value,
+			TTL:     dns.TTL(srvBody.TTL.Value),
+			Proxied: false, // SRV records cannot be proxied
+			Type:    "SRV",
+			Content: content,
+			Data:    srvData,
+		}
+	} else {
+		body := params.Body.(dns.RecordNewParamsBody)
+		record = dns.RecordResponse{
+			ID:       generateDNSRecordID(body.Type.String(), body.Name.Value, body.Content.Value),
+			Name:     body.Name.Value,
+			TTL:      dns.TTL(body.TTL.Value),
+			Proxied:  body.Proxied.Value,
+			Type:     dns.RecordResponseType(body.Type.String()),
+			Content:  body.Content.Value,
+			Priority: body.Priority.Value,
+		}
 	}
 
 	m.Actions = append(m.Actions, MockAction{
@@ -193,16 +214,37 @@ func (m *mockCloudFlareClient) ListDNSRecords(ctx context.Context, params dns.Re
 
 func (m *mockCloudFlareClient) UpdateDNSRecord(ctx context.Context, recordID string, params dns.RecordUpdateParams) (*dns.RecordResponse, error) {
 	zoneID := params.ZoneID.String()
-	body := params.Body.(dns.RecordUpdateParamsBody)
+	var record dns.RecordResponse
 
-	record := dns.RecordResponse{
-		ID:       recordID,
-		Name:     body.Name.Value,
-		TTL:      dns.TTL(body.TTL.Value),
-		Proxied:  body.Proxied.Value,
-		Type:     dns.RecordResponseType(body.Type.String()),
-		Content:  body.Content.Value,
-		Priority: body.Priority.Value,
+	// Handle SRV records which use dns.SRVRecordParam
+	if srvBody, ok := params.Body.(dns.SRVRecordParam); ok {
+		srvData := &dns.SRVRecordData{
+			Priority: srvBody.Data.Value.Priority.Value,
+			Weight:   srvBody.Data.Value.Weight.Value,
+			Port:     srvBody.Data.Value.Port.Value,
+			Target:   srvBody.Data.Value.Target.Value,
+		}
+		content := formatSRVContent(srvData)
+		record = dns.RecordResponse{
+			ID:      recordID,
+			Name:    srvBody.Name.Value,
+			TTL:     dns.TTL(srvBody.TTL.Value),
+			Proxied: false, // SRV records cannot be proxied
+			Type:    "SRV",
+			Content: content,
+			Data:    srvData,
+		}
+	} else {
+		body := params.Body.(dns.RecordUpdateParamsBody)
+		record = dns.RecordResponse{
+			ID:       recordID,
+			Name:     body.Name.Value,
+			TTL:      dns.TTL(body.TTL.Value),
+			Proxied:  body.Proxied.Value,
+			Type:     dns.RecordResponseType(body.Type.String()),
+			Content:  body.Content.Value,
+			Priority: body.Priority.Value,
+		}
 	}
 
 	m.Actions = append(m.Actions, MockAction{
@@ -469,6 +511,60 @@ func TestCloudflareMx(t *testing.T) {
 	)
 }
 
+func TestCloudflareSrv(t *testing.T) {
+	endpoints := []*endpoint.Endpoint{
+		{
+			RecordType: "SRV",
+			DNSName:    "_sip._tcp.srv.bar.com",
+			Targets:    endpoint.Targets{"10 20 5060 sip.bar.com", "10 50 5060 sip2.bar.com"},
+			RecordTTL:  120,
+		},
+	}
+
+	AssertActions(t, &CloudFlareProvider{}, endpoints, []MockAction{
+		{
+			Name:     "Create",
+			ZoneId:   "001",
+			RecordId: generateDNSRecordID("SRV", "_sip._tcp.srv.bar.com", "10 20 5060 sip.bar.com"),
+			RecordData: dns.RecordResponse{
+				ID:      generateDNSRecordID("SRV", "_sip._tcp.srv.bar.com", "10 20 5060 sip.bar.com"),
+				Type:    "SRV",
+				Name:    "_sip._tcp.srv.bar.com",
+				Content: "10 20 5060 sip.bar.com",
+				TTL:     120,
+				Proxied: false,
+				Data: &dns.SRVRecordData{
+					Priority: 10,
+					Weight:   20,
+					Port:     5060,
+					Target:   "sip.bar.com",
+				},
+			},
+		},
+		{
+			Name:     "Create",
+			ZoneId:   "001",
+			RecordId: generateDNSRecordID("SRV", "_sip._tcp.srv.bar.com", "10 50 5060 sip2.bar.com"),
+			RecordData: dns.RecordResponse{
+				ID:      generateDNSRecordID("SRV", "_sip._tcp.srv.bar.com", "10 50 5060 sip2.bar.com"),
+				Type:    "SRV",
+				Name:    "_sip._tcp.srv.bar.com",
+				Content: "10 50 5060 sip2.bar.com",
+				TTL:     120,
+				Proxied: false,
+				Data: &dns.SRVRecordData{
+					Priority: 10,
+					Weight:   50,
+					Port:     5060,
+					Target:   "sip2.bar.com",
+				},
+			},
+		},
+	},
+		[]string{endpoint.RecordTypeSRV},
+	)
+}
+
 func TestCloudflareTxt(t *testing.T) {
 	endpoints := []*endpoint.Endpoint{
 		{
@@ -678,12 +774,23 @@ func TestCloudflareSetProxied(t *testing.T) {
 			var targets endpoint.Targets
 			var content string
 			var priority float64
+			var srvData *dns.SRVRecordData
 
-			if testCase.recordType == "MX" {
+			switch testCase.recordType {
+			case "MX":
 				targets = endpoint.Targets{"10 mx.example.com"}
 				content = "mx.example.com"
 				priority = 10
-			} else {
+			case "SRV":
+				targets = endpoint.Targets{"10 20 5060 sip.example.com"}
+				content = "10 20 5060 sip.example.com"
+				srvData = &dns.SRVRecordData{
+					Priority: 10,
+					Weight:   20,
+					Port:     5060,
+					Target:   "sip.example.com",
+				}
+			default:
 				targets = endpoint.Targets{"127.0.0.1"}
 				content = "127.0.0.1"
 			}
@@ -713,6 +820,9 @@ func TestCloudflareSetProxied(t *testing.T) {
 			if testCase.recordType == "MX" {
 				recordData.Priority = priority
 			}
+			if testCase.recordType == "SRV" {
+				recordData.Data = srvData
+			}
 			AssertActions(t, &CloudFlareProvider{}, endpoints, []MockAction{
 				{
 					Name:       "Create",
@@ -720,7 +830,7 @@ func TestCloudflareSetProxied(t *testing.T) {
 					RecordId:   expectedID,
 					RecordData: recordData,
 				},
-			}, []string{endpoint.RecordTypeA, endpoint.RecordTypeCNAME, endpoint.RecordTypeNS, endpoint.RecordTypeMX}, testCase.recordType+" record on "+testCase.domain)
+			}, []string{endpoint.RecordTypeA, endpoint.RecordTypeCNAME, endpoint.RecordTypeNS, endpoint.RecordTypeMX, endpoint.RecordTypeSRV}, testCase.recordType+" record on "+testCase.domain)
 		})
 	}
 }
@@ -2990,4 +3100,278 @@ func TestZoneService(t *testing.T) {
 
 func generateDNSRecordID(rrtype string, name string, content string) string {
 	return fmt.Sprintf("%s-%s-%s", name, rrtype, content)
+}
+
+func TestParseSRVContent(t *testing.T) {
+	tests := []struct {
+		name        string
+		content     string
+		expected    *CloudflareSRVData
+		expectError bool
+		errorMsg    string
+	}{
+		{
+			name:    "valid SRV record",
+			content: "10 20 5060 sip.example.com",
+			expected: &CloudflareSRVData{
+				Priority: 10,
+				Weight:   20,
+				Port:     5060,
+				Target:   "sip.example.com",
+			},
+			expectError: false,
+		},
+		{
+			name:    "valid SRV record with zero values",
+			content: "0 0 80 web.example.com",
+			expected: &CloudflareSRVData{
+				Priority: 0,
+				Weight:   0,
+				Port:     80,
+				Target:   "web.example.com",
+			},
+			expectError: false,
+		},
+		{
+			name:        "too few parts",
+			content:     "10 20 5060",
+			expectError: true,
+			errorMsg:    "expected 4 parts",
+		},
+		{
+			name:        "too many parts",
+			content:     "10 20 5060 sip.example.com extra",
+			expectError: true,
+			errorMsg:    "expected 4 parts",
+		},
+		{
+			name:        "empty content",
+			content:     "",
+			expectError: true,
+			errorMsg:    "expected 4 parts",
+		},
+		{
+			name:        "invalid priority",
+			content:     "abc 20 5060 sip.example.com",
+			expectError: true,
+			errorMsg:    "invalid priority",
+		},
+		{
+			name:        "invalid weight",
+			content:     "10 xyz 5060 sip.example.com",
+			expectError: true,
+			errorMsg:    "invalid weight",
+		},
+		{
+			name:        "invalid port",
+			content:     "10 20 notaport sip.example.com",
+			expectError: true,
+			errorMsg:    "invalid port",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			result, err := parseSRVContent(tc.content)
+			if tc.expectError {
+				assert.Error(t, err)
+				assert.Nil(t, result)
+				if tc.errorMsg != "" {
+					assert.Contains(t, err.Error(), tc.errorMsg)
+				}
+			} else {
+				assert.NoError(t, err)
+				assert.Equal(t, tc.expected, result)
+			}
+		})
+	}
+}
+
+func TestFormatSRVContent(t *testing.T) {
+	tests := []struct {
+		name     string
+		data     *dns.SRVRecordData
+		expected string
+	}{
+		{
+			name: "typical SRV data",
+			data: &dns.SRVRecordData{
+				Priority: 10,
+				Weight:   20,
+				Port:     5060,
+				Target:   "sip.example.com",
+			},
+			expected: "10 20 5060 sip.example.com",
+		},
+		{
+			name: "zero values",
+			data: &dns.SRVRecordData{
+				Priority: 0,
+				Weight:   0,
+				Port:     80,
+				Target:   "web.example.com",
+			},
+			expected: "0 0 80 web.example.com",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			result := formatSRVContent(tc.data)
+			assert.Equal(t, tc.expected, result)
+		})
+	}
+}
+
+func TestNewCloudFlareChangeSRV(t *testing.T) {
+	provider := &CloudFlareProvider{}
+
+	tests := []struct {
+		name        string
+		endpoint    *endpoint.Endpoint
+		target      string
+		expectError bool
+	}{
+		{
+			name: "valid SRV record",
+			endpoint: &endpoint.Endpoint{
+				RecordType: "SRV",
+				DNSName:    "_sip._tcp.example.com",
+				RecordTTL:  120,
+			},
+			target:      "10 20 5060 sip.example.com",
+			expectError: false,
+		},
+		{
+			name: "invalid SRV record - malformed target",
+			endpoint: &endpoint.Endpoint{
+				RecordType: "SRV",
+				DNSName:    "_sip._tcp.example.com",
+				RecordTTL:  120,
+			},
+			target:      "invalid",
+			expectError: true,
+		},
+		{
+			name: "invalid SRV record - bad priority",
+			endpoint: &endpoint.Endpoint{
+				RecordType: "SRV",
+				DNSName:    "_sip._tcp.example.com",
+				RecordTTL:  120,
+			},
+			target:      "abc 20 5060 sip.example.com",
+			expectError: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			change, err := provider.newCloudFlareChange(cloudFlareCreate, tc.endpoint, tc.target, nil)
+			if tc.expectError {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+				assert.NotNil(t, change)
+				assert.Equal(t, "SRV", string(change.ResourceRecord.Type))
+				assert.NotNil(t, change.ResourceRecord.Data)
+			}
+		})
+	}
+}
+
+func TestGroupByNameAndTypeWithCustomHostnames_SRV(t *testing.T) {
+	provider := &CloudFlareProvider{}
+
+	srvData := &dns.SRVRecordData{
+		Priority: 10,
+		Weight:   20,
+		Port:     5060,
+		Target:   "sip.example.com",
+	}
+
+	records := DNSRecordsMap{
+		{Name: "_sip._tcp.example.com", Type: "SRV", Content: "10 20 5060 sip.example.com"}: {
+			ID:      "123",
+			Name:    "_sip._tcp.example.com",
+			Type:    "SRV",
+			TTL:     120,
+			Proxied: false,
+			Data:    srvData,
+			Content: "10 20 5060 sip.example.com",
+		},
+	}
+
+	endpoints := provider.groupByNameAndTypeWithCustomHostnames(records, nil)
+
+	require.Len(t, endpoints, 1)
+	assert.Equal(t, "_sip._tcp.example.com", endpoints[0].DNSName)
+	assert.Equal(t, "SRV", endpoints[0].RecordType)
+	require.Len(t, endpoints[0].Targets, 1)
+	assert.Equal(t, "10 20 5060 sip.example.com", endpoints[0].Targets[0])
+}
+
+func TestGetSRVCreateParams(t *testing.T) {
+	srvData := &dns.SRVRecordData{
+		Priority: 10,
+		Weight:   20,
+		Port:     5060,
+		Target:   "sip.example.com",
+	}
+
+	change := &cloudFlareChange{
+		Action: cloudFlareCreate,
+		ResourceRecord: dns.RecordResponse{
+			Name:    "_sip._tcp.example.com",
+			TTL:     120,
+			Type:    "SRV",
+			Data:    srvData,
+			Comment: "test comment",
+		},
+	}
+
+	params := getSRVCreateParams("zone123", change)
+
+	assert.Equal(t, "zone123", params.ZoneID.Value)
+
+	// Verify the body is SRVRecordParam
+	srvBody, ok := params.Body.(dns.SRVRecordParam)
+	require.True(t, ok, "Body should be SRVRecordParam")
+	assert.Equal(t, "_sip._tcp.example.com", srvBody.Name.Value)
+	assert.Equal(t, float64(10), srvBody.Data.Value.Priority.Value)
+	assert.Equal(t, float64(20), srvBody.Data.Value.Weight.Value)
+	assert.Equal(t, float64(5060), srvBody.Data.Value.Port.Value)
+	assert.Equal(t, "sip.example.com", srvBody.Data.Value.Target.Value)
+}
+
+func TestGetSRVUpdateParams(t *testing.T) {
+	srvData := &dns.SRVRecordData{
+		Priority: 10,
+		Weight:   20,
+		Port:     5060,
+		Target:   "sip.example.com",
+	}
+
+	change := cloudFlareChange{
+		Action: cloudFlareUpdate,
+		ResourceRecord: dns.RecordResponse{
+			Name:    "_sip._tcp.example.com",
+			TTL:     120,
+			Type:    "SRV",
+			Data:    srvData,
+			Comment: "test comment",
+		},
+	}
+
+	params := getSRVUpdateParams("zone123", change)
+
+	assert.Equal(t, "zone123", params.ZoneID.Value)
+
+	// Verify the body is SRVRecordParam
+	srvBody, ok := params.Body.(dns.SRVRecordParam)
+	require.True(t, ok, "Body should be SRVRecordParam")
+	assert.Equal(t, "_sip._tcp.example.com", srvBody.Name.Value)
+	assert.Equal(t, float64(10), srvBody.Data.Value.Priority.Value)
+	assert.Equal(t, float64(20), srvBody.Data.Value.Weight.Value)
+	assert.Equal(t, float64(5060), srvBody.Data.Value.Port.Value)
+	assert.Equal(t, "sip.example.com", srvBody.Data.Value.Target.Value)
 }
